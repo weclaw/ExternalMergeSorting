@@ -1,4 +1,6 @@
 ﻿using CommandLine;
+using FluentValidation.Results;
+using LargeFileSorting.FileGenerators;
 using LargeFileSorting.InputArguments;
 using LargeFileSorting.Sorting;
 using System.Diagnostics;
@@ -8,60 +10,75 @@ namespace LargeFileSorting
 {
     internal class Program
     {
-        //In larger setup of course should be passed in through DI
-        private static readonly IArgumentsValidator<LargeFileSortingToolArguments>? _validator = new LargeFileSortingArgumentsValidator();
-
         static void Main()
         {
-            var sw = new Stopwatch();
-            sw.Start();
-            LargeFileSortingToolArguments arguments = new LargeFileSortingToolArguments { FilePath = "C:\\Users\\WeclawskiAndrzej\\source\\repos\\ExternalMergeSort\\inputMIT20GB", Mode = ExecutionMode.SortFile }; //GetValidInputArguments();
+            LargeFileSortingToolArguments arguments = GetValidInputArguments();
 
-            if (arguments.QuitCommand)
-                return;
-
-            switch(arguments.Mode)
+            switch (arguments.Mode)
             {
                 case ExecutionMode.GenerateFile:
-                    ExecuteFileGeneration(arguments.FilePath);
+                    ExecuteFileGeneration(arguments.GetFileGenerationParameters());
                     break;
                 case ExecutionMode.SortFile:
-                    ExecuteSort(arguments.FilePath);
+                    ExecuteSort(arguments.GetSortingParameters());
                     break;
             };
-
-            sw.Stop();
-            Console.WriteLine($"{sw.Elapsed.TotalSeconds}");
         }
 
         private static LargeFileSortingToolArguments GetValidInputArguments()
         {
             LargeFileSortingToolArguments? arguments = null;
+            ValidationResult validationResult = null;
+
+            Console.WriteLine($"Please provide correct input arguments. For more info use --help.");
 
             do
             {
-                Console.WriteLine($"Please provide correct input arguments. For more info use --help.");
                 var args = Console.ReadLine().SplitArgs();
 
                 ParserResult<LargeFileSortingToolArguments> result = Parser.Default
                               .ParseArguments<LargeFileSortingToolArguments>(args)
                               .WithParsed(result => arguments = result);
+
+                var validator = GetCorrectValidator(arguments);
+                validationResult = validator?.ValidateArguments(arguments);
+
+                if(!validationResult?.IsValid ?? true)
+                {
+                    arguments = null;
+                    validationResult?.Errors.ForEach(e => Console.WriteLine(e.ErrorMessage));
+                }
             }
-            while (arguments == null || !_validator.IsValid(arguments.Value));
+            while (arguments == null);
 
-            return arguments.Value;
+            return arguments;
         }
 
-        private static void ExecuteSort(string filePath)
-        {;
-            var sorter = new ExternalMergeSorter(new SortingParameters(filePath, 10000, 200));
-            sorter.Sort();
-        }
-
-        private static void ExecuteFileGeneration(string filePath)
+        private static IArgumentsValidator<LargeFileSortingToolArguments> GetCorrectValidator(LargeFileSortingToolArguments? arguments)
         {
-            var sorter = new ExternalMergeSorter(new SortingParameters(filePath, 10000, 200));
+            switch(arguments?.Mode)
+            {
+                case ExecutionMode.GenerateFile:
+                    return new FileGenerationArgumentsValidator();
+                case ExecutionMode.SortFile:
+                    return new SortingArgumentsValidator();
+                default:
+                    return null;
+            }
+        }
+
+        private static void ExecuteSort(SortingParameters sortingParameters)
+        {;
+            var sorter = new ExternalMergeSorter(sortingParameters);
             sorter.Sort();
+        }
+
+        private static void ExecuteFileGeneration(FileGenerationParameters parameters)
+        {
+            var generator = new RandomStringFileGenerator(parameters);
+            var duplicates = generator.Generate();
+
+            Console.WriteLine($"Written {duplicates} duplicated rows.");
         }
     }
 }

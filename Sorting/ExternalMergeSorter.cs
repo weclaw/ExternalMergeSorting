@@ -1,71 +1,54 @@
-﻿using LargeFileSorting.InputArguments;
-using Microsoft.VisualBasic;
-using System.Diagnostics;
-using System.IO;
-using System.Reflection.PortableExecutable;
+﻿using System.Data;
+using System.Text;
 
 namespace LargeFileSorting.Sorting
 {
-    internal struct ExternalMergeSorter : IFileSorter
+    internal class ExternalMergeSorter : IFileSorter
     {
-        private const int BYTES_IN_MG = 1024 * 1024;
-        private const short LONG_MAX_LENGTH = 13;
+        private const short ULONG_MAX_LENGTH = 20;
         private readonly string _inputFilePath;
-        private readonly int _inputFileBufferSizeBytes = 50000; //FileShare.None ucina 4s, lepsze niz 64, to i 100000 sweet spot, ale jak pamiec wazniejsza 10000 nie jest duzo slabsze a zuzywa 10/ mniej pamieci i pewnie rozjedzie sie na k-way mergu
-        private readonly string _outputFilePathBase;
+        private readonly int _fileBufferSizeBytes = 50000;
+        private readonly string _inputFileDirPath;
         private readonly int _splitChunkSize;
-        private readonly long _memoryLimitBytes;
+        private readonly bool _skipCleanup;
 
-        public ExternalMergeSorter(SortingParameters sortingParameters) : this()
+        private readonly IFileMerger _merger;
+
+        public ExternalMergeSorter(SortingParameters sortingParameters)
         {
+            if (!File.Exists(sortingParameters.InputFilePath))
+                throw new ArgumentException("Provided file does not exist!");
+
             _inputFilePath = sortingParameters.InputFilePath;
-            _outputFilePathBase = _inputFilePath.Split(".")[0].Replace("ExternalMergeSort", "ExternalMergeSort\\temp");
-            _splitChunkSize = 1000000;// sortingParameters.ChunkLinesLimit; (chyba ustawic limit na 100000)
-            _memoryLimitBytes = sortingParameters.MemoryUsageMBSoftLimit * BYTES_IN_MG;
+            _inputFileDirPath = Directory.GetParent(_inputFilePath).FullName;
+            _splitChunkSize = sortingParameters.ChunkLinesLimit;
+            _skipCleanup = sortingParameters.SkipCleanup;
+
+            _merger = new KWayMerger(_inputFileDirPath, sortingParameters.SkipCleanup, sortingParameters.MergeKParameter);
         }
 
         public void Sort()
         {
-            //using (FileStream fs = new FileStream(_inputFilePath, FileMode.Open, FileAccess.Read, FileShare.None, _inputFileBufferSizeBytes, FileOptions.SequentialScan))
-            //using (BufferedStream bs = new BufferedStream(fs, _inputFileBufferSizeBytes))
-            //using (StreamReader sr = new StreamReader(bs))
-            //{
-            //    using (FileStream fs2 = new FileStream(_outputFilePathBase.Replace("2GB", "20GB"), FileMode.Create, FileAccess.Write, FileShare.Read, _inputFileBufferSizeBytes))
-            //    using (BufferedStream bs2 = new BufferedStream(fs2, _inputFileBufferSizeBytes))
-            //    using (StreamWriter outputFileStream = new StreamWriter(bs2))
-            //    {
-            //        string line;
+            var splittedFiles = Split();
 
-            //        for(int i = 0 ; i < 10;i++)
-            //        {
-            //            while ((line = sr.ReadLine()) != null)
-            //            {
-            //                outputFileStream.WriteLine(line);
-            //            }
+            var finalFile = _merger.Merge(splittedFiles, true);
 
-            //            sr.DiscardBufferedData();
-            //            sr.BaseStream.Seek(0, System.IO.SeekOrigin.Begin);
-            //        }
-            //    }
-
-
-            //}
-
-            var iterations = Split();
-            Merge(iterations);
+            if (!_skipCleanup)
+                Directory.Delete($"{_inputFileDirPath}\\temp");
+            
         }
 
-        private int Split()
+        private List<string> Split()
         {
-            using (FileStream fs = new FileStream(_inputFilePath, FileMode.Open, FileAccess.Read, FileShare.None, _inputFileBufferSizeBytes, FileOptions.SequentialScan))
-            using (BufferedStream bs = new BufferedStream(fs, _inputFileBufferSizeBytes))
+            using (FileStream fs = new FileStream(_inputFilePath, FileMode.Open, FileAccess.Read, FileShare.None, _fileBufferSizeBytes, FileOptions.SequentialScan))
+            using (BufferedStream bs = new BufferedStream(fs, _fileBufferSizeBytes))
             using (StreamReader sr = new StreamReader(bs))
             {
-                string outputFilePathBase = _outputFilePathBase;
-                long memoryLimitBytes = _memoryLimitBytes;
+                string outputFilePathBase = $"{_inputFileDirPath}\\temp";
                 int iteration = 0;
-                List<Task> sortAndSaveTasks = new List<Task>();
-                Process proc = Process.GetCurrentProcess();
+                List<Task<string>> sortAndSaveTasks = new List<Task<string>>();
+
+                Directory.CreateDirectory(outputFilePathBase);
 
                 while (!sr.EndOfStream)
                 {
@@ -85,122 +68,44 @@ namespace LargeFileSorting.Sorting
                         array = newArray;
                     }
 
-                    //is this issue?
                     var sortInputParams = new SortAndSaveInputParameters(outputFilePathBase, iteration++, array);
-                    sortAndSaveTasks.Add(Task.Run(() => SortAndSaveArray(sortInputParams)));
+                    sortAndSaveTasks.Add(Task<string>.Factory.StartNew(() => SortAndSaveArray(sortInputParams) ));
                 }
 
                 Task.WaitAll(sortAndSaveTasks.Where(t => !t.IsCompleted).ToArray());
 
-                return iteration;
+                return sortAndSaveTasks.Select(t => t.Result).ToList();
             }
+        }
 
-            string TransormRecord(string line)
-            { 
-                var splitedArray = line.Split(".");
-                return $"{splitedArray[1]}.{splitedArray[0].PadLeft(LONG_MAX_LENGTH, '-')}";
-            }
+        private string TransormRecord(string line)
+        {
+            var splitedArray = line.Split('.', 2);
+            return $"{splitedArray[1]}.{splitedArray[0].PadLeft(ULONG_MAX_LENGTH, '-')}";
+        }
 
-            void SortAndSaveArray(SortAndSaveInputParameters input)
+        private string SortAndSaveArray(SortAndSaveInputParameters input)
+        {
+            var fileName = $"{input.OutputFilePathBase}\\{input.Iteration}";
+
+            Array.Sort(input.InputArray, StringComparer.Ordinal);
+            File.WriteAllLines(fileName, input.InputArray);
+
+            return fileName;
+        }
+
+        internal struct SortAndSaveInputParameters
+        {
+            public string OutputFilePathBase { get; init; }
+            public int Iteration { get; init; }
+            public string[] InputArray { get; init; }
+
+            public SortAndSaveInputParameters(string outputFilePathBase, int iteration, string[] array)
             {
-                var fileName = $"{input.OutputFilePathBase}_{input.Iteration}.txt";
-
-                Array.Sort(input.InputArray);
-                File.WriteAllLines(fileName, input.InputArray);
+                this.OutputFilePathBase = outputFilePathBase;
+                this.Iteration = iteration;
+                InputArray = array;
             }
-        }
-
-        private void Merge(int iterations)
-        {
-            int readingBufferSize = 50000;
-            string outputFilePathBase = _outputFilePathBase;
-
-            var minHeap = new PriorityQueue<StreamReader, string>();
-
-            using (FileStream fs = new FileStream($"{_outputFilePathBase}_final.txt", FileMode.Create, FileAccess.Write, FileShare.Read, _inputFileBufferSizeBytes))
-            using (BufferedStream bs = new BufferedStream(fs, _inputFileBufferSizeBytes))
-            using (StreamWriter outputFileStream = new StreamWriter(bs))
-            {
-                //var streamsArray = new StreamReader[iterations];
-                //var recordsBuffer = new string[iterations];
-                ////rozwazyc pozniej, 3 opcje - najpierw otworzy
-                //Parallel.For(0, iterations, i =>
-                //{
-                //    var fs = new FileStream($"{outputFilePathBase}_{i}.txt", FileMode.Open, FileAccess.Read, FileShare.None, readingBufferSize, FileOptions.SequentialScan);
-                //    var bs = new BufferedStream(fs, readingBufferSize);
-                //    var sr = new StreamReader(bs);
-                //    recordsBuffer[i] = sr.ReadLine();
-                //    streamsArray[i] = sr;
-
-                //    //lock (_heapSync)
-                //    //{
-                //    //    minHeap.Enqueue(sr, sr.ReadLine());
-                //    //}
-                //});
-
-                //for (int i = 0; i < iterations; i++)
-                //{
-                //    minHeap.Enqueue(streamsArray[i], recordsBuffer[i]);
-                //}
-
-                long counter = 0;
-
-                for (int i = 0; i < iterations; i++)
-                {
-                    var inputFile = new FileStream($"{outputFilePathBase}_{i}.txt", FileMode.Open, FileAccess.Read, FileShare.None, readingBufferSize, FileOptions.SequentialScan);
-                    var inputBuffer = new BufferedStream(inputFile, readingBufferSize);
-                    var inputReader = new StreamReader(inputBuffer);
-
-                    minHeap.Enqueue(inputReader, inputReader.ReadLine());
-                    counter++;
-                }
-
-                StreamReader currentReader;
-                string currentRecord;
-
-                while (minHeap.TryDequeue(out currentReader, out currentRecord))
-                {
-                    counter++;
-                    //Try async?
-                    outputFileStream.WriteLine(TransformRecord(currentRecord));
-                    var nextRecord = currentReader.ReadLine();
-                    if(nextRecord != null)
-                    {
-                        minHeap.Enqueue(currentReader, nextRecord);
-                    }
-                    else
-                    {
-                        currentReader.Close();
-                        currentReader.Dispose();
-                    }
-                }
-            }
-
-            //delete files
-
-            // minheap tuple string bufferedReader - then compare if instead of stream in queue we keep index in the array of it
-            // jak nie zadziala za dobrze to moze byc kilkukrotny k-merge, parallel i potem wynikowe znowu az zostanie plikow mniej niz k (wpisac w usprawnienia jesli nie bedzie potrzebny, albo 2 tryb)  
-            // filestream write at first. Then compare to buffer in array to be written parallel when full
-        }
-
-        private string TransformRecord(string currentRecord)
-        {
-            var splitedArray = currentRecord.Split(".");
-            return $"{splitedArray[1].Trim('-')}.{splitedArray[0]}";
-        }
-    }
-
-    internal struct SortAndSaveInputParameters
-    {
-        public string OutputFilePathBase { get; init; }
-        public int Iteration { get; init; }
-        public string[] InputArray { get; init; }
-
-        public SortAndSaveInputParameters(string outputFilePathBase, int iteration, string[] array)
-        {
-            this.OutputFilePathBase = outputFilePathBase;
-            this.Iteration = iteration;
-            InputArray = array;
         }
     }
 }
