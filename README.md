@@ -12,7 +12,7 @@ Example parameters and usage:
     
 3. -m 1 -p "C:\\Users\WeclawskiAndrzej\source\repos\ExternalMergeSort\input2GBduplicates" -d true
   
-  Sort file generated at 1. with default settings but leave the temp files to be able to see what it generated during it's processing
+   Sort file generated at 1. with default settings but leave the temp files to be able to see what it generated during it's processing
     
 4. -m 1 -p "C:\\Users\WeclawskiAndrzej\source\repos\ExternalMergeSort\input2GBduplicates" -k 20
    
